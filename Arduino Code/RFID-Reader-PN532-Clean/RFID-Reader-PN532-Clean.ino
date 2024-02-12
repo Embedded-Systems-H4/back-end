@@ -19,6 +19,7 @@ const char* password = "SkyLab_Academy";
 const char* mqttServer = "10.71.202.218";
 const int mqttPort = 1883;
 
+const char* ArduinoType = "RFID"; // RFID, Keypad, None
 const char* DoorOpenTopic = "devices/doors";
 const char* RegisterTopic = "devices/register";
 const char* CardLinkTopic = "devices/link";
@@ -78,7 +79,7 @@ void setup(void) {
   client.setCallback(callback);
   if(reconnect()){
 
-    String device = "{\"id\":\"" + (String)MacStr + "\",\"name\":\"" + DeviceName + "\",\"type\":\"door\"}";
+    String device = "{\"id\":\"" + (String)MacStr + "\",\"name\":\"" + DeviceName + "\",\"type\":\"door\", \"accesstype\":\"" + (String)ArduinoType + "\"}";
     Serial.println(device);
     if(client.publish(RegisterTopic, device.c_str())){
       Serial.println("Device has been registered!");
