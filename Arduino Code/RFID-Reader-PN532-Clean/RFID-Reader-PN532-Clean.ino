@@ -19,6 +19,15 @@ const char* password = "SkyLab_Academy";
 const char* mqttServer = "10.71.202.218";
 const int mqttPort = 1883;
 
+const char* DoorOpenTopic = "devices/doors";
+const char* RegisterTopic = "devices/register";
+const char* CardLinkTopic = "devices/link";
+const char* CardUpdateTopic = "devices/linkupdate";
+const char* HeartbeatTopic = "devices/heartbeat";
+const char* SensorStatusTopic = "devices/sensorstatus";
+int TestPin = 10; // Connected to something, but not used (RFID)
+int TestPinVal = 0;
+
 byte Mac[6];
 char MacStr[6];
 String DeviceName;
@@ -27,8 +36,11 @@ String DeviceName;
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+void(* resetFunc) (void) = 0; 
+
 void setup(void) {
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(TestPin, INPUT);
 
   Serial.begin(115200);
   while (!Serial) delay(2000);  // Delay for startup
@@ -46,6 +58,9 @@ void setup(void) {
   }
   memset(MacStr, '\0', sizeof(MacStr));
   itoa(num, MacStr, 10);
+  if((String)MacStr == "0"){
+    resetFunc();  //call reset
+  }
 
   // Set device name
   DeviceName = "device-" + (String)MacStr + "-door";
@@ -65,14 +80,18 @@ void setup(void) {
 
     String device = "{\"id\":\"" + (String)MacStr + "\",\"name\":\"" + DeviceName + "\",\"type\":\"door\"}";
     Serial.println(device);
-    if(client.publish("devices/register", device.c_str())){
+    if(client.publish(RegisterTopic, device.c_str())){
       Serial.println("Device has been registered!");
     } else {
       Serial.println("Failed to send registration message!");
     }
 
-    if(client.subscribe("devices/doors")){
-      Serial.println("Subscribed to topic!");
+    if(client.subscribe(CardLinkTopic)){
+      Serial.println("Subscribed to link topic!");
+    }
+
+    if(client.subscribe(DoorOpenTopic)){
+      Serial.println("Subscribed to doors topic!");
     }
   }
 }
@@ -143,9 +162,27 @@ char EditValue1[16];
 char EditValue2[16];
 char EditValue3[16];
 
+char* Topic;
+byte* buffer;
+char* bufferChar;
 boolean Rflag = false;
 
+unsigned int LoopHeartbeatDelay = 3000;
+unsigned long LoopTime;
+unsigned long LoopTimeoutTime;
+
+
 void LoopExtras(void) {
+  
+  LoopTime = millis();
+  if (LoopTimeoutTime + LoopHeartbeatDelay < LoopTime) {
+    LoopTimeoutTime = millis();
+
+    // Heartbeat executed code
+    if (client.connected()) {
+      LoopHeartbeat();
+    }
+  }
 
   uint8_t success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
@@ -177,9 +214,24 @@ void LoopExtras(void) {
 
 }
 
-char* Topic;
-byte* buffer;
-char* bufferChar;
+
+int LastSentSensorStatus = 0;
+void LoopHeartbeat(){
+  String heartbeat = "{\"id\":\"" + (String)MacStr + "\"}";
+  client.publish(HeartbeatTopic, heartbeat.c_str());
+  Serial.println(heartbeat);
+  
+  // TestPinVal = digitalRead(TestPin);
+  TestPinVal = round(((double) rand() / (RAND_MAX)) + 1) - 1;
+
+  if(TestPinVal != LastSentSensorStatus){
+    LastSentSensorStatus = TestPinVal;
+    String sensor = "{\"parent\":\"" + (String)MacStr + "\",\"id\":\"" + TestPin + "\",\"state\":\"" + TestPinVal + "\"}";
+    client.publish(SensorStatusTopic, sensor.c_str());
+    Serial.println(sensor);
+  }
+
+}
 
 void callback(char* topic, byte* payload, unsigned int length) {
   //Payload=[];
@@ -222,6 +274,7 @@ void HandleRequest(){
     pch = strtok (NULL, ",");
     if (index == 1) {
       strcpy(EditValue1,pch);
+      EditValue1[15] = '\0';
     } else if (index == 2) {
       strcpy(EditValue2,pch);
       EditValue2[15] = '\0';
@@ -235,8 +288,11 @@ void HandleRequest(){
   if(strstr(EditValue0, MacStr)){ // Correct arduino
     Serial.println("Correct Id Callback was recieved.");    
 
-    // Check Card Write
-    WriteRFID();
+    // Check if topic is Link topic
+    if(strstr(Topic, CardLinkTopic)){
+      // Check Card Write
+      WriteRFID();
+    }
 
     delay(5000);
   } else{
@@ -254,31 +310,54 @@ void WriteRFID(){
     return;
   }
 
-  if(strstr(EditValue1, "edit")){
+  Serial.println("Ready to read and update card!");
 
-    Serial.println("Ready to read and update card!");
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 10000);
 
-    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 10000);
+  if (success) {
 
-    if (success) {
+    Block4Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 1, keyuniversal);
+    Block5Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 5, 1, keyuniversal);
 
-      Block4Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 1, keyuniversal);
-      Block5Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 5, 1, keyuniversal);
+    if (Block4Auth && Block5Auth) {
+      Block4Auth = nfc.mifareclassic_WriteDataBlock(4, (uint8_t*)EditValue2);
+      Block5Auth = nfc.mifareclassic_WriteDataBlock(5, (uint8_t*)EditValue3);
 
-      if (Block4Auth && Block5Auth) {
-        Block4Auth = nfc.mifareclassic_WriteDataBlock(4, (uint8_t*)EditValue2);
-        Block5Auth = nfc.mifareclassic_WriteDataBlock(5, (uint8_t*)EditValue3);
+      if (Block4Auth && Block5Auth){
+        Serial.println("Card has been updated!");
 
-        if (Block4Auth && Block5Auth){
-          Serial.println("Card has been updated!");
-        }else{
-          Serial.println("ERROR! - Card was not updated!");
-        }
+        SetUidValue(uid);
+
+        UpdateCardLink();
+
+      }else{
+        Serial.println("ERROR! - Card was not updated!");
       }
     }
   }
 
   Serial.println("Card update has terminated/ended.");
+}
+
+void UpdateCardLink(){
+
+  String cardinfo = "{\"id\": \"" + String(EditValue1) + "\", \"card\": \"" + String(UidValue) + "\" }";
+
+  client.publish(CardUpdateTopic, cardinfo.c_str());
+  Serial.println(cardinfo);
+
+}
+
+void SetUidValue(uint8_t uid[]){
+  
+  // Uid to string
+  int uidNum = 0;
+  for (int i = 0; i < 6; i++) {
+    uidNum += (int)uid[i];
+  }
+  memset(UidValue, '\0', sizeof(UidValue));
+  itoa(uidNum, UidValue, 10);
+
 }
 
 
@@ -320,13 +399,7 @@ void CheckRFID(uint8_t uid[], uint8_t uidLength){
           // check connection and fix
           reconnect();
 
-          // Uid to string
-          int uidNum = 0;
-          for (int i = 0; i < 6; i++) {
-            uidNum += (int)uid[i];
-          }
-          memset(UidValue, '\0', sizeof(UidValue));
-          itoa(uidNum, UidValue, 10);
+          SetUidValue(uid);
 
           // Generate Message
           String Block4String = String(reinterpret_cast<char*>(Block4));
@@ -360,7 +433,7 @@ void CheckRFID(uint8_t uid[], uint8_t uidLength){
           Serial.println(finalmessage);
 
           //Send request to broker
-          if(client.publish("devices/doors", finalmessage)){
+          if(client.publish(DoorOpenTopic, finalmessage)){
             Serial.println("Message has been sent!");
             Serial.println(" ");
           } else {
@@ -384,16 +457,5 @@ void SetLast(uint8_t id[]) {
     memcpy(lastUid, id, sizeof id);
   } else {
     memcpy(lastUid, (const uint8_t[]){ 0x00, 0x00, 0x00, 0x00 }, sizeof lastUid);
-  }
-}
-
-void SetData(uint8_t success, uint8_t data[16], int blockNumber, uint8_t newdata[16]) {
-  if (WriteToCard) {
-    if (blockNumber == 4) {
-      memcpy(data, newdata, 16);
-    } else if (blockNumber == 5) {
-      memcpy(data, newdata, 16);
-    }
-    // success = nfc.mifareclassic_WriteDataBlock(blockNumber, data);
   }
 }

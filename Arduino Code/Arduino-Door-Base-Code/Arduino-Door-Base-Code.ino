@@ -8,6 +8,10 @@ const char* password = "SkyLab_Academy";
 const char* mqttServer = "10.71.202.218";
 const int mqttPort = 1883;
 
+const char* DoorOpenTopic = "devices/doors";
+const char* HeartbeatTopic = "devices/heartbeat";
+const char* RegisterTopic = "devices/register";
+
 byte Mac[6];
 char MacStr[6];
 String DeviceName;
@@ -15,6 +19,8 @@ String DeviceName;
 // Wifi Client
 WiFiClient espClient;
 PubSubClient client(espClient);
+
+void(* resetFunc) (void) = 0; 
 
 void setup(void) {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -35,6 +41,9 @@ void setup(void) {
   }
   memset(MacStr, '\0', sizeof(MacStr));
   itoa(num, MacStr, 10);
+  if((String)MacStr == "0"){
+    resetFunc();  //call reset
+  }
 
   // Set device name
   DeviceName = "device-" + (String)MacStr + "-door";
@@ -63,7 +72,7 @@ void setup(void) {
     // Needs to be subscribed to stuff here:
 
     // Subscribe to MQTT client
-    if(client.subscribe("devices/doors")){
+    if(client.subscribe(DoorOpenTopic)){
       Serial.println("Subscribed to topic!");
     }
   }
@@ -102,7 +111,15 @@ bool reconnect() {
 }
 
 void LoopExtras(void) {
-  // Code for extra code used in the code loop
+  // Location for extra code used in the code loop
+}
+
+void LoopHeartbeat(){
+  String heartbeat = "{\"id\":\"" + (String)MacStr + "\"}";
+  client.publish(HeartbeatTopic, heartbeat.c_str());
+  Serial.println(heartbeat);
+
+  // Location for extra code that should function as a heartbeat.
 }
 
 char* Topic;
