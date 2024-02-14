@@ -36,6 +36,8 @@ String DeviceName;
 // Wifi Client
 WiFiClient espClient;
 PubSubClient client(espClient);
+int WiFiConnectionRetries = 10;
+int WiFiRetries = 0;
 
 void(* resetFunc) (void) = 0; 
 
@@ -68,11 +70,16 @@ void setup(void) {
 
   // Connect to WiFi
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
+  while (WiFi.status() != WL_CONNECTED && WiFiRetries < WiFiConnectionRetries) {
+    Serial.print("Connecting to WiFi... Try: ");
+    Serial.println(WiFiRetries + 1);
     delay(1000);
-    Serial.println("Connecting to WiFi...");
+    WiFiRetries += 1;
   }
-  Serial.println("Connected to WiFi");
+  WiFiRetries = 0;
+  if (WiFi.status() == WL_CONNECTED){
+    Serial.println("Connected to WiFi");
+  }
 
   // Connect to MQTT broker
   client.setServer(mqttServer, mqttPort);
@@ -121,17 +128,34 @@ void loop(void){
   LoopExtras();
 }
 
+int MQTTConnectionRetries = 10;
+int MQTTRetries = 0;
 // MQTT reconnect code
 bool reconnect() {
-  while (!client.connected()) {
-    Serial.println("Attempting MQTT connection...");
+  while (!client.connected() && MQTTRetries < MQTTConnectionRetries ) {
+    Serial.print("Attempting MQTT connection... Try: ");
+    Serial.println(MQTTRetries + 1);
     // Attempt to connect
     if (client.connect(DeviceName.c_str(), "device", "DataIt2024")) {
       Serial.println("Connected to MQTT broker");
     } else {
       delay(100);
     }
+
+    MQTTRetries += 1;
   }
+  
+  if (!client.connected()) { // Connection failed!
+    if (MQTTRetries == MQTTConnectionRetries){
+      Serial.println("Connection to MQTT failed!");
+      MQTTRetries += 1;
+    }
+
+    return false;
+  } else if (client.connected()) {
+    MQTTRetries = 0;
+  }
+
   return true;
 }
 
@@ -342,10 +366,12 @@ void WriteRFID(){
 
 void UpdateCardLink(){
 
-  String cardinfo = "{\"id\": \"" + String(EditValue1) + "\", \"card\": \"" + String(UidValue) + "\" }";
+  if (client.connected()){
+    String cardinfo = "{\"id\": \"" + String(EditValue1) + "\", \"card\": \"" + String(UidValue) + "\" }";
 
-  client.publish(CardUpdateTopic, cardinfo.c_str());
-  Serial.println(cardinfo);
+    client.publish(CardUpdateTopic, cardinfo.c_str());
+    Serial.println(cardinfo);
+  }
 
 }
 
@@ -398,50 +424,51 @@ void CheckRFID(uint8_t uid[], uint8_t uidLength){
 
       if(Block4Auth && Block5Auth){
           // check connection and fix
-          reconnect();
+          if (reconnect()){
+            
+            SetUidValue(uid);
 
-          SetUidValue(uid);
+            // Generate Message
+            String Block4String = String(reinterpret_cast<char*>(Block4));
+            memset(EditValue2, '\0', sizeof(EditValue2));
+            EditValue2[15] = '\0';
+            strcpy(EditValue2, Block4String.c_str());
 
-          // Generate Message
-          String Block4String = String(reinterpret_cast<char*>(Block4));
-          memset(EditValue2, '\0', sizeof(EditValue2));
-          EditValue2[15] = '\0';
-          strcpy(EditValue2, Block4String.c_str());
+            String Block5String = String(reinterpret_cast<char*>(Block5));
+            memset(EditValue3, '\0', sizeof(EditValue3));
+            EditValue3[15] = '\0';
+            strcpy(EditValue3, Block5String.c_str());
 
-          String Block5String = String(reinterpret_cast<char*>(Block5));
-          memset(EditValue3, '\0', sizeof(EditValue3));
-          EditValue3[15] = '\0';
-          strcpy(EditValue3, Block5String.c_str());
+            int macLen = strlen(MacStr);
+            int uiLen = strlen(UidValue);
+            int block4Len = strlen(EditValue2);
+            int block5Len = strlen(EditValue3);
 
-          int macLen = strlen(MacStr);
-          int uiLen = strlen(UidValue);
-          int block4Len = strlen(EditValue2);
-          int block5Len = strlen(EditValue3);
+            // Combining MacAddress and Message;
+            int length = macLen + uiLen + block4Len + block5Len;
+            char* finalmessage = new char[length]{};
 
-          // Combining MacAddress and Message;
-          int length = macLen + uiLen + block4Len + block5Len;
-          char* finalmessage = new char[length]{};
+            memset(finalmessage, 0, length); // Reset mem
+            strcpy(finalmessage, MacStr);
+            strcat(finalmessage, ",");
+            strcat(finalmessage, UidValue);
+            strcat(finalmessage, ",");
+            strcat(finalmessage, EditValue2);
+            strcat(finalmessage, ",");
+            strcat(finalmessage, EditValue3);
 
-          memset(finalmessage, 0, length); // Reset mem
-          strcpy(finalmessage, MacStr);
-          strcat(finalmessage, ",");
-          strcat(finalmessage, UidValue);
-          strcat(finalmessage, ",");
-          strcat(finalmessage, EditValue2);
-          strcat(finalmessage, ",");
-          strcat(finalmessage, EditValue3);
+            Serial.println(finalmessage);
 
-          Serial.println(finalmessage);
+            //Send request to broker
+            if(client.publish(DoorOpenTopic, finalmessage)){
+              Serial.println("Message has been sent!");
+              Serial.println(" ");
+            } else {
+              Serial.println("Failed to send message!");
+            }
 
-          //Send request to broker
-          if(client.publish(DoorOpenTopic, finalmessage)){
-            Serial.println("Message has been sent!");
-            Serial.println(" ");
-          } else {
-            Serial.println("Failed to send message!");
+            memset(finalmessage, 0, length); // Reset mem
           }
-
-          memset(finalmessage, 0, length); // Reset mem
 
           delay(LoopDelay);
       } else {

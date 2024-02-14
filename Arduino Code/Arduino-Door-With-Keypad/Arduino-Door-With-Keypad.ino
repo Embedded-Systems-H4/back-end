@@ -2,13 +2,16 @@
 #include <WiFiS3.h>
 #include <PubSubClient.h>
 
+#include <Wire.h>
+#include "SparkFun_Qwiic_Keypad_Arduino_Library.h"
+
 // Wifi Constants
 const char* ssid = "SkyLab Academy";
 const char* password = "SkyLab_Academy";
 const char* mqttServer = "10.71.202.218";
 const int mqttPort = 1883;
 
-const char* ArduinoType = "None"; // RFID, Keypad, None
+const char* ArduinoType = "Keypad"; // RFID, Keypad, None
 
 const char* DoorOpenTopic = "devices/doors";
 const char* HeartbeatTopic = "devices/heartbeat";
@@ -23,6 +26,17 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 int WiFiConnectionRetries = 10;
 int WiFiRetries = 0;
+
+// Keypad constants and variables
+KEYPAD keypad1;
+const char keyCode[] = {'1', '2', '3', '4', '5', '6'}; // the correct keyCode - change to your own unique set of keys if you like.
+char userEntry[] = {0, 0, 0, 0, 0, 0}; // used to store the presses coming in from user
+boolean userIsActive = false; // used to know when a user is active and therefore we want to engage timeout stuff
+
+#define TIMEOUT 60 // 100s of milliseconds, used to reset input. 30 equates to 3 second.
+byte timeOutCounter = 0; // variable this is incremented to keep track of timeouts.
+byte userEntryIndex = 0; // used to keep track of where we are in the userEntry, incremented on each press, reset on timeout.
+
 
 void(* resetFunc) (void) = 0; 
 
@@ -87,8 +101,23 @@ void setup(void) {
   }
 }
 
+uint8_t Address = 0x4B; //Start address (Default 0x4B)
+
 void SetupExtraPerf(){
 
+  // Wire1 is for the Qwiic connector (Usually Wire when I2C)
+  Wire1.begin();
+
+  if (keypad1.begin(Wire1, Address) == false)
+  {
+    Serial.println("Keypad does not appear to be connected. Please check wiring. Freezing...");
+    while (1);
+  } else {
+    Serial.print("Address: 0x");
+    Serial.print(Address, HEX);
+    Serial.print(" Version: ");
+    Serial.println(keypad1.getVersion());
+  }  
 }
 
 unsigned int LoopHeartbeatDelay = 3000;
@@ -153,8 +182,90 @@ bool reconnect() {
 void LoopExtras(void) {
   
   // Location for extra code used in the code loop
+  keypad1.updateFIFO();  // necessary for keypad to pull button from stack to readable register
+  char button = keypad1.getButton();
+
+  if (button == -1)
+  {
+    Serial.println("No keypad detected");
+    delay(1000);
+  }
+  else if (button != 0)
+  {
+    // CheckEntry checks input for correct code.
+    if(button == '*' && checkEntry() == true){
+
+      Serial.print("\n\rKeycode correct. Wahooooooooooo!");
+      clearEntry();
+      userEntryIndex = 0; // reset
+      timeOutCounter = 0; // reset with any new presses.
+      userIsActive = false; // don't display timeout stuff.
+      delay(1000);
+
+    } else {
+
+      userEntry[userEntryIndex] = button; // store button into next spot in array, note, index is incremented later
+      printEntry();
+      userIsActive = true; // used to only timeout when user is active
+
+      userEntryIndex++;
+      if (userEntryIndex == sizeof(keyCode)){
+        // userEntryIndex = sizeof(keyCode) - 1; // reset
+        userEntryIndex = sizeof(keyCode) - 1; // reset
+      }
+      timeOutCounter = 0; // reset with any new presses.
+
+    }
+  }
+
+  delay(10); //10 is good, more is better, note this effects total timeout time
   
+  timeOutCounter++;
+  
+  if ((timeOutCounter == TIMEOUT) && (userIsActive == true)) // this means the user is actively inputing
+  {
+    Serial.println("\n\rTimed out... try again.");
+    timeOutCounter = 0; // reset
+    userEntryIndex = 0; // reset
+    clearEntry();
+    userIsActive = false; // so we don't continuously timeout while inactive.
+  }
+
 }
+
+// check user entry against keyCode array.
+// if they all match up, then respond with true.
+boolean checkEntry() {
+
+  for (byte i = 0 ; i < sizeof(keyCode) ; i++)
+  {
+    // do nothing, cause we're only looking for failures
+    if ( userEntry[i] == keyCode[i] ){
+    } else {
+      return false;
+    }
+  }
+
+  return true; // if we get here, all values were correct.
+}
+
+void clearEntry() {
+  for (byte i = 0 ; i < sizeof(userEntry) ; i++)
+  {
+    userEntry[i] = 0; // fill with spaces
+  }
+}
+
+void printEntry() {
+  Serial.print("UserEntry: ");
+  for (byte i = 0 ; i < sizeof(userEntry) ; i++)
+  {
+    Serial.print(char(userEntry[i]));
+  }
+  Serial.println();
+}
+
+
 
 // Only run if connected
 void LoopHeartbeat(){
