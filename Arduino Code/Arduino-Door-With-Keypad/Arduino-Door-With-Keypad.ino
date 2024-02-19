@@ -84,7 +84,7 @@ void setup(void) {
   client.setCallback(callback);
   if(reconnect()){
 
-    String device = "{\"id\":\"" + (String)MacStr + "\",\"name\":\"" + DeviceName + "\",\"type\":\"door\", \"accesstype\":\"" + (String)ArduinoType + "\"}";
+    String device = "{\"deviceId\":" + (String)MacStr + ",\"deviceName\":\"" + DeviceName + "\",\"deviceType\":\"door\", \"deviceAccessType\":\"" + (String)ArduinoType + "\"}";
     Serial.println(device);
     if(client.publish("devices/register", device.c_str())){
       Serial.println("Device has been registered!");
@@ -134,7 +134,7 @@ void loop(void){
   }
   
   LoopTime = millis();
-  if (LoopTimeoutTime + LoopHeartbeatDelay < LoopTime) {
+  if (LoopTimeoutTime + LoopHFeartbeatDelay < LoopTime) {
     LoopTimeoutTime = millis();
 
     // Heartbeat executed code

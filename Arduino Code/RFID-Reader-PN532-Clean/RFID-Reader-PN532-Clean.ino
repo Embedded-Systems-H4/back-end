@@ -2,6 +2,13 @@
 #include <SPI.h>
 #include <Adafruit_PN532.h>
 
+// Servo library
+#include <Servo.h>
+Servo projectServo;
+int MOTOR_PIN = 12;
+int ServoDegreesOpen = 180;
+int ServoDegreesClosed = 0;
+
 // Wifi libraries
 #include <WiFiS3.h>
 #include <PubSubClient.h>
@@ -16,19 +23,21 @@ const char* ssid = "SkyLab Academy";
 const char* password = "SkyLab_Academy";
 // const char* ssid = "bruh";
 // const char* password = "Datait2024!";
-const char* mqttServer = "10.71.202.218";
+const char* mqttServer = "10.71.204.218";
 const int mqttPort = 1883;
 
 const char* ArduinoType = "RFID"; // RFID, Keypad, None
-const char* DoorOpenTopic = "devices/doors";
+// Topic constants for publishing and subscribing
+const char* AccessTopic = "devices/access";
 const char* RegisterTopic = "devices/register";
 const char* CardLinkTopic = "devices/link";
 const char* CardUpdateTopic = "devices/linkupdate";
+const char* DeviceLockTopic = "devices/lock";
 const char* HeartbeatTopic = "devices/heartbeat";
 const char* SensorStatusTopic = "devices/sensorstatus";
-int TestPin = 10; // Connected to something, but not used (RFID)
-int TestPinVal = 0;
+const char* AccessUpdateTopic = "devices/accessupdate";
 
+// Varibles for Mac address and unique id based on mac address
 byte Mac[6];
 char MacStr[6];
 String DeviceName;
@@ -39,12 +48,20 @@ PubSubClient client(espClient);
 int WiFiConnectionRetries = 10;
 int WiFiRetries = 0;
 
+// Reset function if arduino encounters something that isn't right
 void(* resetFunc) (void) = 0; 
+
+
+// Pin variables for accessing and controlling LED's or Sensors
+int LED_PIN = 8;
+int LED_PIN2 = 9;
+int TestPin = 10; // Switch
+int TestPinVal = 0; // Switch value
 
 void setup(void) {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(TestPin, INPUT);
 
+  // Start Serial connection
   Serial.begin(115200);
   while (!Serial) delay(2000);  // Delay for startup
 
@@ -86,7 +103,7 @@ void setup(void) {
   client.setCallback(callback);
   if(reconnect()){
 
-    String device = "{\"id\":\"" + (String)MacStr + "\",\"name\":\"" + DeviceName + "\",\"type\":\"door\", \"accesstype\":\"" + (String)ArduinoType + "\"}";
+    String device = "{\"deviceId\":" + (String)MacStr + ",\"deviceName\":\"" + DeviceName + "\",\"deviceType\":\"door\", \"deviceAccessType\":\"" + (String)ArduinoType + "\"}";
     Serial.println(device);
     if(client.publish(RegisterTopic, device.c_str())){
       Serial.println("Device has been registered!");
@@ -94,17 +111,24 @@ void setup(void) {
       Serial.println("Failed to send registration message!");
     }
 
+    // Subscribe to topics
     if(client.subscribe(CardLinkTopic)){
       Serial.println("Subscribed to link topic!");
     }
 
-    if(client.subscribe(DoorOpenTopic)){
-      Serial.println("Subscribed to doors topic!");
+    if(client.subscribe(DeviceLockTopic)){
+      Serial.println("Subscribed to lock topic!");
+    }
+
+    if(client.subscribe(AccessUpdateTopic)){
+      Serial.println("Subscribed to access topic!");
     }
   }
 }
 
+// Section for extra setup code
 void SetupExtraPerf(){
+  // Start NFC board
   nfc.begin();
 
   uint32_t versiondata = nfc.getFirmwareVersion();
@@ -112,6 +136,16 @@ void SetupExtraPerf(){
     Serial.print("Didn't find PN53x board");
     while (1);  // Halt
   }
+
+  // Servo init
+  projectServo.attach(MOTOR_PIN);
+
+  // Set Sensor input
+  pinMode(TestPin, INPUT);
+
+  // Set LED pin-outs
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(LED_PIN2, OUTPUT);
 }
 
 // Loop method running
@@ -159,6 +193,7 @@ bool reconnect() {
   return true;
 }
 
+bool DevicePermaLocked = false;
 
 // Variables for NFC check/send
 unsigned long myTime;
@@ -171,10 +206,10 @@ uint8_t defaultUid[] = { 0x00, 0x00, 0x00, 0x00 };
 uint8_t keyuniversal[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 uint8_t Block4Auth;
-uint8_t Block4[16];
+uint8_t Block4[30];
 
 uint8_t Block5Auth;
-uint8_t Block5[16];
+uint8_t Block5[30];
 
 const int LoopDelay = 100;
 
@@ -183,9 +218,9 @@ bool WriteToCard = false;
 char UidValue[6];
 
 char EditValue0[16];
-char EditValue1[16];
-char EditValue2[16];
-char EditValue3[16];
+char EditValue1[30];
+char EditValue2[30];
+char EditValue3[30];
 
 char* Topic;
 byte* buffer;
@@ -209,6 +244,11 @@ void LoopExtras(void) {
     }
   }
 
+  // Faster Heartbeat for more precise Sensor reads
+  if(client.connected()){
+    FasterHeartbeat();
+  }
+
   uint8_t success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
   uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
@@ -224,7 +264,7 @@ void LoopExtras(void) {
     }
   }
 
-  if (!Rflag) {
+  if (!Rflag && !DevicePermaLocked) {
     success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, LoopDelay);
     if (success) {
       LoopInterupted = true;
@@ -237,25 +277,29 @@ void LoopExtras(void) {
     delay(LoopDelay);
   }
 
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(LED_PIN2, HIGH);
+  projectServo.write(ServoDegreesClosed);
 }
 
 
-int LastSentSensorStatus = 0;
 void LoopHeartbeat(){
-  String heartbeat = "{\"id\":\"" + (String)MacStr + "\"}";
+  String heartbeat = "{\"deviceId\":" + (String)MacStr + "}";
   client.publish(HeartbeatTopic, heartbeat.c_str());
   Serial.println(heartbeat);
-  
-  // TestPinVal = digitalRead(TestPin);
-  TestPinVal = round(((double) rand() / (RAND_MAX)) + 1) - 1;
+}
+
+int LastSentSensorStatus = 0;
+void FasterHeartbeat(){
+  TestPinVal = digitalRead(TestPin);
+  // TestPinVal = round(((double) rand() / (RAND_MAX)) + 1) - 1;
 
   if(TestPinVal != LastSentSensorStatus){
     LastSentSensorStatus = TestPinVal;
-    String sensor = "{\"parent\":\"" + (String)MacStr + "\",\"id\":\"" + TestPin + "\",\"state\":\"" + TestPinVal + "\"}";
+    String sensor = "{\"parentId\":" + (String)MacStr + ",\"sensorId\":" + TestPin + ",\"state\":\"" + TestPinVal + "\"}";
     client.publish(SensorStatusTopic, sensor.c_str());
     Serial.println(sensor);
   }
-
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -299,29 +343,66 @@ void HandleRequest(){
     pch = strtok (NULL, ",");
     if (index == 1) {
       strcpy(EditValue1,pch);
-      EditValue1[15] = '\0';
+      EditValue1[29] = '\0';
     } else if (index == 2) {
       strcpy(EditValue2,pch);
-      EditValue2[15] = '\0';
+      EditValue2[29] = '\0';
     } else if (index == 3) {
       strcpy(EditValue3,pch);
-      EditValue3[15] = '\0';
+      EditValue3[29] = '\0';
     }
     index++;
   }
 
   if(strstr(EditValue0, MacStr)){ // Correct arduino
-    Serial.println("Correct Id Callback was recieved.");    
+    Serial.print("Correct Id Callback was recieved on topic:");
+    Serial.println(Topic);
+    
+    String SentData = String(EditValue0) + "," + String(EditValue1) + "," + String(EditValue2) + "," + String(EditValue3);
+    Serial.println(SentData);
 
     // Check if topic is Link topic
     if(strstr(Topic, CardLinkTopic)){
       // Check Card Write
       WriteRFID();
+      delay(1000);
     }
 
-    delay(5000);
+    if(strstr(Topic, AccessUpdateTopic)){
+      // Device access
+      HandleAccess();
+      delay(1000);
+    }
   } else{
+    if(strstr(EditValue0, "all") && strstr(Topic, DeviceLockTopic)){
+      // Check Device Lock
+      HandlePermaLock();
+      delay(1000);
+    }
+
     Serial.println("Callback not sent with correct Door Id!");
+  }
+}
+
+void HandlePermaLock(){
+  if (strstr(EditValue1, "false")){
+    DevicePermaLocked = false;
+  } else {
+    DevicePermaLocked = true;
+  }
+}
+
+void HandleAccess(){
+  if(strstr(EditValue2, "true")){
+    // If Access is granted turn on LED on LED_PIN2 (Low for direct LED setup)
+    digitalWrite(LED_PIN2, LOW);
+    projectServo.write(ServoDegreesOpen);
+    Serial.println("Access was granted to door!");
+    delay(3000);
+  } else {
+    // If Access was not granted turn on LED on LED_PIN (High for Keyestudio LED setup)
+    digitalWrite(LED_PIN, HIGH);
+    Serial.println("Access was NOT granted to door!");
   }
 }
 
@@ -345,8 +426,8 @@ void WriteRFID(){
     Block5Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 5, 1, keyuniversal);
 
     if (Block4Auth && Block5Auth) {
-      Block4Auth = nfc.mifareclassic_WriteDataBlock(4, (uint8_t*)EditValue2);
-      Block5Auth = nfc.mifareclassic_WriteDataBlock(5, (uint8_t*)EditValue3);
+      Block4Auth = nfc.mifareclassic_WriteDataBlock(4, (uint8_t*)EditValue1);
+      Block5Auth = nfc.mifareclassic_WriteDataBlock(5, (uint8_t*)EditValue2);
 
       if (Block4Auth && Block5Auth){
         Serial.println("Card has been updated!");
@@ -357,8 +438,13 @@ void WriteRFID(){
 
       }else{
         Serial.println("ERROR! - Card was not updated!");
+        // Send if Error!
+        UpdateCardLink();
       }
     }
+  } else {
+    // Send if Timeout!
+    UpdateCardLink();
   }
 
   Serial.println("Card update has terminated/ended.");
@@ -367,7 +453,7 @@ void WriteRFID(){
 void UpdateCardLink(){
 
   if (client.connected()){
-    String cardinfo = "{\"id\": \"" + String(EditValue1) + "\", \"card\": \"" + String(UidValue) + "\" }";
+    String cardinfo = "{\"deviceId\":" + String(MacStr) + ", \"profileId\":" + String(EditValue1) + ", \"cardId\": " + String(UidValue) + " }";
 
     client.publish(CardUpdateTopic, cardinfo.c_str());
     Serial.println(cardinfo);
@@ -402,7 +488,7 @@ void CheckRFID(uint8_t uid[], uint8_t uidLength){
       Block4Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 1, keyuniversal);
       if (Block4Auth) {
         Block4Auth = nfc.mifareclassic_ReadDataBlock(4, Block4);
-        nfc.PrintHexChar(Block4, 16);
+        nfc.PrintHexChar(Block4, 30);
       } else {
         SetLast(defaultUid);  // Reset
         return;
@@ -415,7 +501,7 @@ void CheckRFID(uint8_t uid[], uint8_t uidLength){
         Block5Auth = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 5, 1, keyuniversal);
         if (Block5Auth) {
           Block5Auth = nfc.mifareclassic_ReadDataBlock(5, Block5);
-          nfc.PrintHexChar(Block5, 16);
+          nfc.PrintHexChar(Block5, 30);
         } else {
           SetLast(defaultUid);  // Reset
           return;
@@ -430,44 +516,18 @@ void CheckRFID(uint8_t uid[], uint8_t uidLength){
 
             // Generate Message
             String Block4String = String(reinterpret_cast<char*>(Block4));
-            memset(EditValue2, '\0', sizeof(EditValue2));
-            EditValue2[15] = '\0';
-            strcpy(EditValue2, Block4String.c_str());
-
             String Block5String = String(reinterpret_cast<char*>(Block5));
-            memset(EditValue3, '\0', sizeof(EditValue3));
-            EditValue3[15] = '\0';
-            strcpy(EditValue3, Block5String.c_str());
 
-            int macLen = strlen(MacStr);
-            int uiLen = strlen(UidValue);
-            int block4Len = strlen(EditValue2);
-            int block5Len = strlen(EditValue3);
-
-            // Combining MacAddress and Message;
-            int length = macLen + uiLen + block4Len + block5Len;
-            char* finalmessage = new char[length]{};
-
-            memset(finalmessage, 0, length); // Reset mem
-            strcpy(finalmessage, MacStr);
-            strcat(finalmessage, ",");
-            strcat(finalmessage, UidValue);
-            strcat(finalmessage, ",");
-            strcat(finalmessage, EditValue2);
-            strcat(finalmessage, ",");
-            strcat(finalmessage, EditValue3);
-
-            Serial.println(finalmessage);
+            String cardInfo = "{\"deviceId\":" + String(MacStr) + ",\"cardId\":" + String(UidValue) + ",\"value1\":\"" + Block4String + "\",\"value2\":\"" + Block5String + "\"}";
+            Serial.println(cardInfo);
 
             //Send request to broker
-            if(client.publish(DoorOpenTopic, finalmessage)){
+            if(client.publish(AccessTopic, cardInfo.c_str())){
               Serial.println("Message has been sent!");
               Serial.println(" ");
             } else {
               Serial.println("Failed to send message!");
-            }
-
-            memset(finalmessage, 0, length); // Reset mem
+            }          
           }
 
           delay(LoopDelay);

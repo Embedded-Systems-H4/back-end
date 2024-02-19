@@ -1,3 +1,7 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h> // Library for LCD
+#define BACKLIGHT_PIN 13
+
 // Wifi libraries
 #include <WiFiS3.h>
 #include <PubSubClient.h>
@@ -5,12 +9,12 @@
 // Wifi Constants
 const char* ssid = "SkyLab Academy";
 const char* password = "SkyLab_Academy";
-const char* mqttServer = "10.71.202.218";
+const char* mqttServer = "10.71.204.218";
 const int mqttPort = 1883;
 
 const char* ArduinoType = "None"; // RFID, Keypad, None
 
-const char* DoorOpenTopic = "devices/doors";
+const char* AccessTopic = "devices/access";
 const char* HeartbeatTopic = "devices/heartbeat";
 const char* RegisterTopic = "devices/register";
 
@@ -25,6 +29,10 @@ int WiFiConnectionRetries = 10;
 int WiFiRetries = 0;
 
 void(* resetFunc) (void) = 0; 
+
+// LiquidCrystal_I2C lcd(0x27);  // Set the LCD I2C address
+LiquidCrystal_I2C lcd(0x27, 16, 2); // I2C address 0x27, 16 column and 2 rows
+
 
 void setup(void) {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -70,7 +78,7 @@ void setup(void) {
   client.setCallback(callback);
   if(reconnect()){
 
-    String device = "{\"id\":\"" + (String)MacStr + "\",\"name\":\"" + DeviceName + "\",\"type\":\"door\", \"accesstype\":\"" + (String)ArduinoType + "\"}";
+    String device = "{\"deviceId\":" + (String)MacStr + ",\"deviceName\":\"" + DeviceName + "\",\"deviceType\":\"door\", \"deviceAccessType\":\"" + (String)ArduinoType + "\"}";
     Serial.println(device);
     if(client.publish("devices/register", device.c_str())){
       Serial.println("Device has been registered!");
@@ -81,14 +89,28 @@ void setup(void) {
     // Needs to be subscribed to stuff here:
 
     // Subscribe to MQTT client
-    if(client.subscribe(DoorOpenTopic)){
+    if(client.subscribe(AccessTopic)){
       Serial.println("Subscribed to topic!");
     }
   }
 }
 
 void SetupExtraPerf(){
+  // Switch on the backlight
+  pinMode ( BACKLIGHT_PIN, OUTPUT );
+  digitalWrite ( BACKLIGHT_PIN, HIGH );
 
+  Serial.println("Init");
+  lcd.begin(16,2);               // initialize the lcd
+  lcd.clear();
+
+  lcd.home ();                   // go home
+  Serial.println("Hello, ARDUINO ");
+  lcd.print("Hello, ARDUINO ");  
+  // lcd.setCursor ( 0, 1 );        // go to the next line
+  // Serial.println(" FORUM - fm   ");
+  // lcd.print (" FORUM - fm   ");
+  delay ( 1000 );
 }
 
 unsigned int LoopHeartbeatDelay = 3000;
@@ -158,7 +180,7 @@ void LoopExtras(void) {
 
 // Only run if connected
 void LoopHeartbeat(){
-  String heartbeat = "{\"id\":\"" + (String)MacStr + "\"}";
+  String heartbeat = "{\"deviceId\":" + (String)MacStr + "}";
   client.publish(HeartbeatTopic, heartbeat.c_str());
   Serial.println(heartbeat);
 
